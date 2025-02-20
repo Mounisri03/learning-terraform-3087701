@@ -1,0 +1,851 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform:
+  - AWS::Serverless-2016-10-31
+  - CIBT-Network
+Description: >
+  casedocslambda
+  Sample SAM Template for casedocslambda
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+
+Parameters:
+  EnvironmentName:
+    Description: Environment Name
+    Type: String
+    Default: "Sandbox"
+
+  DBName:
+    Description: Database name
+    Type: String
+
+  DBUserName:
+    Description: Database username
+    Type: String
+
+  DBPort:
+    Description: Database port
+    Type: Number
+
+  ProjectName:
+    Description: Project Name
+    Type: String
+
+  AllowedOrigin:
+    Description: Allowed Origin
+    Type: String
+    Default: "*"
+
+  Auth0Issuer:
+    Description: auth0 issuer 
+    Type: String
+    NoEcho: true
+  
+  Auth0Audience:
+    Description: auth0 audience
+    Type: String
+    NoEcho: true
+  
+  BuildHash:
+    Description: update variable for liquibase
+    Type: String
+    
+  Secrets:
+    Description: Secrets loaded from JSON
+    Type: String
+    Default: ""
+    NoEcho: true
+
+  S3SecretsUri: # S3 bucket uri for eu-central-1 region
+    Description: s3 secret file Name
+    Type: String
+    Default: ""
+  
+  S3SecretsUriUs:  # S3 bucket uri for us-east-1 region
+    Description: s3 secret file Name
+    Type: String
+    Default: ""
+
+  GpgSecretArn:
+    Description: arn of gpg decryption key
+    Type: String
+    Default: ""
+    NoEcho: true
+
+  GpgSecretArnUs:
+    Description: arn of gpg decryption key for us-east-1 region
+    Type: String
+    Default: ""
+    NoEcho: true
+
+  GpgSecretArnEu:
+    Description: arn of gpg decryption key for eu-central-1 region
+    Type: String
+    Default: ""
+    NoEcho: true
+
+  GpgPassphrase:
+    Description: passphrase of gpg decryption key
+    Type: String
+    Default: ""
+    NoEcho: true
+
+  LogsRetentionPolicyInDays:
+    Type: Number
+    Default: 30
+
+  PrimaryRegion:
+    Type: String
+    Default: ""
+
+  SecondaryRegion:
+    Type: String
+    Default: ""
+
+  CreateGlobalCluster:
+    Description: Create GlobalCluster
+    Type: String
+    AllowedValues: 
+      - "true"
+      - "false"
+    Default: "false"      
+ 
+  MaxCapacity:
+    Description: Database Max CPU Capacity
+    Type: String
+    Default: ""
+ 
+  MinCapacity:
+    Description: Database Min CPU Capacity
+    Type: String
+    Default: ""
+  
+  FailOver:
+    Description: Create GlobalCluster
+    Type: String
+    AllowedValues: 
+      - "true"
+      - "false"
+    Default: "true"
+
+  SsmVpcEndpoint:
+    Description: SSM VPC Endpoint URL
+    Type: String
+
+Mappings:
+  ConfigMap:
+    Sandbox:
+      vpcId: "#CIBT::Network::Vpc::Sandbox"
+      subnetIds: "#CIBT::Network::Subnet::Sandbox::Compute"
+      vpceId: "#CIBT::Network::Vpce::VISA::agw"
+      platform: "sandbox"
+      subnetGroup: subnet-group-sandbox-name
+      VpcCidr: "#CIBT::Network::Vpc::CIDR::SANDBOX"
+      
+    Dev:
+      vpcId: "#CIBT::Network::Vpc::SharedServices"
+      subnetIds: "#CIBT::Network::Subnet::SharedServices::Compute"
+      vpceId: "#CIBT::Network::Vpce::SharedServices::agw"
+      platform: "dev"
+      platformShortCode: "d"
+      subnetGroup: subnet-group-sharedservices-name
+      VpcCidr: "#CIBT::Network::Vpc::CIDR::SHAREDSERVICES"
+      
+    Staging:
+      vpcId: "#CIBT::Network::Vpc::SharedServices"
+      subnetIds: "#CIBT::Network::Subnet::SharedServices::Compute"
+      vpceId: "#CIBT::Network::Vpce::SharedServices::agw"
+      platform: "staging"
+      platformShortCode: "s"
+      subnetGroup: subnet-group-sharedservices-name
+      VpcCidr: "#CIBT::Network::Vpc::CIDR::SHAREDSERVICES"
+      
+    Prod:
+      vpcId: "#CIBT::Network::Vpc::SharedServices"
+      subnetIds: "#CIBT::Network::Subnet::SharedServices::Compute"
+      vpceId: "#CIBT::Network::Vpce::SharedServices::agw"
+      platform: "prod"
+      platformShortCode: "p"
+      subnetGroup: subnet-group-sharedservices-name
+      VpcCidr: "#CIBT::Network::Vpc::CIDR::SHAREDSERVICES"
+
+  RegionShortForms:
+    us-east-1:
+      short: ue1
+    eu-central-1:
+      short: ec1
+    ap-southeast-1:
+      short: as1
+
+Conditions:
+  isPrimary:
+    Fn::Equals:
+      - Ref: AWS::Region
+      - us-east-1
+
+  isSecondary:
+    Fn::Equals:
+      - Ref: AWS::Region
+      - eu-central-1
+
+  #Conditions to pass to the reusable auroradb-gloabl.yml to promote regional cluster to global cluster
+  isPrimaryRegion: !Not [!Equals [!Ref PrimaryRegion, ""]]
+  isSecondaryRegion: !Not [!Equals [!Ref SecondaryRegion, ""]]
+  isCreateGlobalCluster:  !Equals [!Ref CreateGlobalCluster, "true"]
+
+Resources:
+
+  CibtPayApiLambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for the Cibt-Pay Api
+      GroupName: !Sub SG-cibtPay-Lambda-${EnvironmentName}
+      VpcId: !FindInMap [ConfigMap, !Ref EnvironmentName, vpcId]
+      SecurityGroupIngress:
+        - IpProtocol: "-1"
+          FromPort: -1
+          ToPort: -1
+          CidrIp: !FindInMap [ConfigMap, !Ref EnvironmentName, VpcCidr]
+      SecurityGroupEgress:
+        - IpProtocol: "TCP"
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: !FindInMap [ConfigMap, !Ref EnvironmentName, VpcCidr]
+        - IpProtocol: "TCP"
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !FindInMap [ConfigMap, !Ref EnvironmentName, VpcCidr]
+        - IpProtocol: "TCP"
+          FromPort: 443
+          ToPort: 443
+          DestinationSecurityGroupId: !ImportValue stripeip-sharedservices-securitygroup-id
+      Tags:
+        - Key: Name
+          Value: !Sub SG-cibtPay-Lambda-${EnvironmentName}
+
+  CustomResourceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for the Cibt Pay Custom Resources
+      GroupName: !Sub SG-${ProjectName}-LiquiBase-CR-${EnvironmentName}
+      VpcId: !FindInMap [ConfigMap, !Ref EnvironmentName, vpcId]
+      SecurityGroupIngress:
+        - IpProtocol: "TCP"
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !FindInMap [ConfigMap, !Ref EnvironmentName, VpcCidr]
+      SecurityGroupEgress:
+        - IpProtocol: "TCP"
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: !FindInMap [ConfigMap, !Ref EnvironmentName, VpcCidr]
+        - IpProtocol: "TCP"
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !FindInMap [ConfigMap, !Ref EnvironmentName, VpcCidr]
+        - IpProtocol: "TCP"
+          FromPort: 443
+          ToPort: 443
+          DestinationPrefixListId: !ImportValue S3PrefixListId
+      Tags:
+        - Key: Name
+          Value: !Sub SG-cibtPayApi-CustomResources-${EnvironmentName}
+
+  WebhookApiLambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for the Cibt-Pay Webhook API
+      GroupName: !Sub SG-${ProjectName}-WebhookApi-${EnvironmentName}
+      VpcId: !FindInMap [ConfigMap, !Ref EnvironmentName, vpcId]
+      SecurityGroupIngress:
+        - IpProtocol: "TCP"
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !FindInMap [ConfigMap, !Ref EnvironmentName, VpcCidr]
+      SecurityGroupEgress:
+        - IpProtocol: "TCP"
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: !FindInMap [ConfigMap, !Ref EnvironmentName, VpcCidr]
+        - IpProtocol: "TCP"
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !FindInMap [ConfigMap, !Ref EnvironmentName, VpcCidr]
+      Tags:
+        - Key: Name
+          Value: !Sub SG-${ProjectName}-WebhookApi-${EnvironmentName}
+
+  # DBInboundRuleCibtPayApiSG:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Condition: isSecondary
+  #   Properties:
+  #     IpProtocol: TCP
+  #     FromPort: 3306
+  #     ToPort: 3306
+  #     SourceSecurityGroupId:
+  #       Fn::GetAtt:
+  #         - CibtPayApiLambdaSecurityGroup
+  #         - GroupId
+  #     GroupId:
+  #       Fn::ImportValue: 
+  #         !Sub "CibtPayOps-cibtpayAuroraDB-db-securitygroup-id-${EnvironmentName}" 
+
+  # DBInboundRuleWebhookApiSG:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Condition: isSecondary
+  #   Properties:
+  #     IpProtocol: TCP
+  #     FromPort: 3306
+  #     ToPort: 3306
+  #     SourceSecurityGroupId:
+  #       Fn::GetAtt:
+  #         - WebhookApiLambdaSecurityGroup
+  #         - GroupId
+  #     GroupId:
+  #       Fn::ImportValue: 
+  #         !Sub "CibtPayOps-cibtpayAuroraDB-db-securitygroup-id-${EnvironmentName}" 
+
+          
+  DBCluster:
+    Type: AWS::CloudFormation::Stack
+    Condition: isPrimary
+    DependsOn: 
+        - CibtPayApiLambdaSecurityGroup
+        - WebhookApiLambdaSecurityGroup
+    Properties:
+      TemplateURL: !If
+        - isCreateGlobalCluster
+        - !Sub 
+          - "https://cibt-devops-sharedservices-${AWSRegion}-${Environment}-ss.s3.amazonaws.com/templates/auroradb-global.yml"
+          - Environment: !FindInMap [ConfigMap, !Ref EnvironmentName, platformShortCode]
+            AWSRegion: !FindInMap [RegionShortForms, !Ref 'AWS::Region', short]
+        - !Sub 
+          - "https://cibt-devops-sharedservices-${AWSRegion}-${Environment}-ss.s3.amazonaws.com/templates/auroradb.yml"
+          - Environment: !FindInMap [ConfigMap, !Ref EnvironmentName, platformShortCode]
+            AWSRegion: !FindInMap [RegionShortForms, !Ref 'AWS::Region', short]
+      TimeoutInMinutes: 60
+      Parameters:
+        VpcId: !FindInMap [ConfigMap, !Ref EnvironmentName, vpcId]
+        SubnetGroup: !FindInMap [ConfigMap, !Ref EnvironmentName, subnetGroup]
+        EnvironmentName: !Ref EnvironmentName
+        LambdaHostSecurityGroup: !Sub ${CibtPayApiLambdaSecurityGroup},${WebhookApiLambdaSecurityGroup},${CustomResourceSecurityGroup}
+        # LambdaHostSecurityGroup: 
+        #       - !Ref CibtPayApiLambdaSecurityGroup
+        #       - !Ref WebhookApiLambdaSecurityGroup
+        VpcCidr: !FindInMap [ConfigMap, !Ref EnvironmentName, VpcCidr]
+        Engine : "aurora-mysql"
+        DBEngineVersion: 8.0.mysql_aurora.3.02.2
+        DBPort: !Ref DBPort
+        DBName: !Ref DBName
+        DBUserName: !Ref DBUserName
+        ProjectName: !Ref ProjectName
+        KmsKeyId: !ImportValue "cibt-sharedservices-rds-key"
+        # adding below parameters for global cluster deployment
+        PrimaryRegion: !If
+            - isPrimaryRegion
+            - !Ref PrimaryRegion
+            - !Ref AWS::NoValue
+        SecondaryRegion: !If
+            - isSecondaryRegion
+            - !Ref SecondaryRegion
+            - !Ref AWS::NoValue        
+        CreateGlobalCluster: !If
+            - isCreateGlobalCluster
+            - !Ref CreateGlobalCluster
+            - !Ref AWS::NoValue
+        MinCapacity: !Ref MinCapacity
+        MaxCapacity: !Ref MaxCapacity
+        FailOver: !Ref FailOver
+
+  CIBTLiquibase:
+    Type: AWS::Serverless::Application
+    Condition: isSecondary # liquibase will get deploy to only eu-central-1 region
+    Properties:
+      Location: ./src/db/db.yaml
+      Parameters:
+        SubnetIds: !FindInMap [ConfigMap, !Ref EnvironmentName, subnetIds]
+        EnvironmentName: !Ref EnvironmentName
+        ProjectName: !Ref ProjectName        
+        LambdaHostSecurityGroup: !Ref CustomResourceSecurityGroup
+        BuildHash: !Ref BuildHash
+        DBSecretsManagerAccessPolicy:
+          !If 
+            - isPrimary
+            - Fn::GetAtt:
+                - DBCluster
+                - Outputs.DBSecretsManagerAccessPolicy
+            - Fn::ImportValue: 
+                !Sub "CibtPayOps-DBSecretsManagerAccessPolicy-${EnvironmentName}" 
+        DBSecretsManager:
+          !If 
+            - isPrimary
+            - Fn::GetAtt:
+                - DBCluster
+                - Outputs.DBSecretsManagerName
+            - Fn::ImportValue: 
+                !Sub "CibtPayOps-DBSecretsManagerName-${EnvironmentName}"
+        
+  CIBTPayApi:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: ./src/apis/CibtPay.Api/app.yml
+      Parameters:
+        VpcId: !FindInMap [ConfigMap, !Ref EnvironmentName, vpcId]
+        SubnetIds: !FindInMap [ConfigMap, !Ref EnvironmentName, subnetIds]
+        EnvironmentName: !Ref EnvironmentName
+        ProjectName: !Ref ProjectName        
+        AllowedOrigin: !Ref AllowedOrigin
+        vpceId: !FindInMap [ConfigMap, !Ref EnvironmentName, vpceId]
+        Auth0Issuer: !Ref Auth0Issuer
+        Auth0Audience: !Ref Auth0Audience
+        LambdaHostSecurityGroup: !Ref CibtPayApiLambdaSecurityGroup
+        LogsRetentionPolicyInDays: !Ref LogsRetentionPolicyInDays
+        SsmVpcEndpoint: !Ref SsmVpcEndpoint
+        # if it is primary region then we pass the Access policy to child stack if not we just pass some dummy value(bcoz CF does not allow AWs:NoValue to child stack parameter)
+        DBSecretsManagerAccessPolicy:
+          !If 
+            - isPrimary
+            - Fn::GetAtt:
+                - DBCluster
+                - Outputs.DBSecretsManagerAccessPolicy
+            - Fn::ImportValue: 
+                !Sub "CibtPayOps-DBSecretsManagerAccessPolicy-${EnvironmentName}" 
+        # if it is primary region then we pass the Secrets manager name to child stack if not we just pass some dummy value(bcoz CF does not allow AWs:NoValue to child stack parameter)
+        DBSecretsManagerName:
+          !If 
+            - isPrimary
+            - Fn::GetAtt:
+                - DBCluster
+                - Outputs.DBSecretsManagerName
+            - Fn::ImportValue: 
+                !Sub "CibtPayOps-DBSecretsManagerName-${EnvironmentName}" 
+
+  WebhookApi:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: ./src/apis/CibtPay.WebhookApi/app.yml
+      Parameters:
+        VpcId: !FindInMap [ConfigMap, !Ref EnvironmentName, vpcId]
+        SubnetIds: !FindInMap [ConfigMap, !Ref EnvironmentName, subnetIds]
+        EnvironmentName: !Ref EnvironmentName
+        ProjectName: !Ref ProjectName        
+        AllowedOrigin: !Ref AllowedOrigin
+        LambdaHostSecurityGroup: !Ref WebhookApiLambdaSecurityGroup
+        LogsRetentionPolicyInDays: !Ref LogsRetentionPolicyInDays
+        # if it is primary region then we pass the Access policy to child stack if not we just pass some dummy value(bcoz CF does not allow AWs:NoValue to child stack parameter)
+        DBSecretsManagerAccessPolicy:
+          !If 
+            - isPrimary
+            - Fn::GetAtt:
+                - DBCluster
+                - Outputs.DBSecretsManagerAccessPolicy
+            - Fn::ImportValue: 
+                !Sub "CibtPayOps-DBSecretsManagerAccessPolicy-${EnvironmentName}" 
+        # if it is primary region then we pass the Secrets manager name to child stack if not we just pass some dummy value(bcoz CF does not allow AWs:NoValue to child stack parameter)
+        DBSecretsManagerName:
+          !If 
+            - isPrimary
+            - Fn::GetAtt:
+                - DBCluster
+                - Outputs.DBSecretsManagerName
+            - Fn::ImportValue: 
+                !Sub "CibtPayOps-DBSecretsManagerName-${EnvironmentName}" 
+  
+  WafV2:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: CIBTPay-WebhookApi-ACL
+      Scope: REGIONAL
+      Description: Web ACL with AWS Managed Rules for webhook API
+      DefaultAction: 
+        Block: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${ProjectName}-WebhookApi-${EnvironmentName}-Metric
+      Rules: 
+        - Name: WebHookStripeIps
+          Priority: 0
+          Action:
+            Allow: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: WebHookStripeIps
+          Statement:
+            IPSetReferenceStatement:
+              Arn: !ImportValue ipsets-webhook-stripe-ip
+        - Name: AWS-AWSManagedRulesCommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesCommonRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+              ExcludedRules:
+                - Name: GenericRFI_BODY
+                - Name: SizeRestrictions_BODY
+        - Name: AWS-AWSManagedRulesAmazonIpReputationList
+          Priority: 2
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesAmazonIpReputationList
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+        - Name: AWS-AWSManagedRulesAdminProtectionRuleSet
+          Priority: 3
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesAdminProtectionRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAdminProtectionRuleSet
+        - Name: AWS-AWSManagedRulesAnonymousIpList
+          Priority: 4
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesAnonymousIpList
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAnonymousIpList
+        - Name: AWS-AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 5
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesKnownBadInputsRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+        - Name: AWS-AWSManagedRulesSQLiRuleSet
+          Priority: 6
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesSQLiRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+
+  # Creating log group for WAF logging
+  WafLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: aws-waf-logs-Webhook-api
+      RetentionInDays: !Ref LogsRetentionPolicyInDays
+      Tags:
+        - Key: env
+          Value: !Ref EnvironmentName
+
+  # Enabling WAf logging
+  WafLoggingConfiguration:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt WafV2.Arn
+      LogDestinationConfigs:
+          - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:aws-waf-logs-Webhook-api"
+    DependsOn:
+      - WafLogGroup
+  
+  ApiWafV2:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub ${ProjectName}-${EnvironmentName}-WebACL-WAF
+      Scope: REGIONAL
+      Description: Web ACL with AWS Managed Rules for Cibt API
+      DefaultAction: 
+        Block: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${ProjectName}-Api-${EnvironmentName}-Metric
+      Rules: 
+        - Name: internalIps
+          Priority: 0
+          Action:
+            Allow: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: internalIps  
+          Statement:
+            IPSetReferenceStatement:
+              Arn: !ImportValue ipsets-cibt-internal-ips
+        - Name: RateLimitRuleGroup
+          Priority: 1
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitRuleGroup
+          Statement:
+            RuleGroupReferenceStatement:
+              Arn: !ImportValue cibt-ruleGroups-ratelimit
+        - Name: AllowedGeographies
+          Priority: 2
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AllowedGeographies
+          Statement:
+            RuleGroupReferenceStatement:
+              Arn: !ImportValue cibt-ruleGroups-allowedgeographies
+        - Name: AWS-AWSManagedRulesCommonRuleSet
+          Priority: 3
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesCommonRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+              ExcludedRules:
+                - Name: GenericRFI_BODY
+                - Name: SizeRestrictions_BODY
+        - Name: AWS-AWSManagedRulesAmazonIpReputationList
+          Priority: 4
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesAmazonIpReputationList
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+        - Name: AWS-AWSManagedRulesAdminProtectionRuleSet
+          Priority: 5
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesAdminProtectionRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAdminProtectionRuleSet
+        - Name: AWS-AWSManagedRulesAnonymousIpList
+          Priority: 6
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesAnonymousIpList
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAnonymousIpList
+        - Name: AWS-AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 7
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesKnownBadInputsRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+        - Name: AWS-AWSManagedRulesSQLiRuleSet
+          Priority: 8
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesSQLiRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+
+  # Creating log group for WAF logging
+  CibtPayApiWafLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: aws-waf-logs-CibtPay-api
+      RetentionInDays: !Ref LogsRetentionPolicyInDays
+      Tags:
+        - Key: env
+          Value: !Ref EnvironmentName
+
+  # Enabling WAf logging
+  CibtPayApiWafLoggingConfiguration:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt ApiWafV2.Arn
+      LogDestinationConfigs:
+          - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:aws-waf-logs-CibtPay-api"
+    DependsOn:
+      - CibtPayApiWafLogGroup
+
+  ApiGatewayWafAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    DependsOn: WebhookApi
+    Properties:
+      WebACLArn: !GetAtt WafV2.Arn
+      ResourceArn: !Sub arn:aws:apigateway:${AWS::Region}::/restapis/${WebhookApi.Outputs.ApiGateway}/stages/${EnvironmentName}
+
+
+  ApiGatewayApiWafAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    DependsOn: CIBTPayApi
+    Properties:
+      WebACLArn: !GetAtt ApiWafV2.Arn
+      ResourceArn: !Sub arn:aws:apigateway:${AWS::Region}::/restapis/${CIBTPayApi.Outputs.ApiGateway}/stages/${EnvironmentName}
+
+
+
+  CustomResourceLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [!Ref ProjectName, SecretsManagerUpdaterCRRole, !FindInMap [RegionShortForms, !Ref 'AWS::Region', short], !Ref EnvironmentName]]
+      Description: Lambda Role for Cibt Pay Secrets Manager Custom Resource Role
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-SecretsManagerUpdater-CRLambdaRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-SecretsManagerUpdater-LoggingPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:PutRetentionPolicy
+                  - logs:DeleteRetentionPolicy
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:logs:*:*:*
+              - Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:s3:::*
+        - PolicyName: !Sub ${ProjectName}-SecretsManagerUpdater-AmazonS3ObjectLambdaExecutionRolePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource:
+                  - "*"
+        - PolicyName: !Sub ${ProjectName}-SecretsManagerUpdater-VPCPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:AssignPrivateIpAddresses
+                  - ec2:UnassignPrivateIpAddresses
+                Effect: Allow
+                Resource:
+                  - "*"
+        - PolicyName: !Sub ${ProjectName}-SecretsManagerUpdater-SecretsManagerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - secretsmanager:GetResourcePolicy
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:ListSecretVersionIds
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:UpdateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:RotateSecret
+                  - secretsmanager:PutSecretValue
+                Effect: Allow
+                Resource: 
+                  - !Sub 
+                    - "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Platform}/cibtpay/*"
+                    - Platform: !FindInMap [ConfigMap, !Ref EnvironmentName, platform]
+        - PolicyName: !Sub ${ProjectName}-SecretsManagerUpdater-SecretsManagerListPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - secretsmanager:ListSecrets
+                Effect: Allow
+                Resource: 
+                  - "*"
+        - PolicyName: !Sub ${ProjectName}-KMS-policy
+          PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Action:
+                    - "kms:Decrypt"
+                  Effect: Allow
+                  Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+
+  SecretsManagementFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./src/lambdas/CibtPay.SecretsManagementLambda
+      Handler: CibtPay.SecretsManagementLambda::CibtPay.SecretsManagementLambda.Function::FunctionHandler
+      Role: !GetAtt CustomResourceLambdaRole.Arn
+      VpcConfig:
+        SubnetIds: !Split [",", !FindInMap [ConfigMap, !Ref EnvironmentName, subnetIds] ]
+        SecurityGroupIds: !Split [",", !Ref CustomResourceSecurityGroup]
+      Runtime: dotnet6
+      Timeout: 900
+
+  SecretsManagerUpdater:
+      Type: Custom::CibtPaySecretsManagerUpdater
+      Properties:
+        ServiceToken: !GetAtt SecretsManagementFunction.Arn 
+        EnvironmentName: !Ref EnvironmentName
+        ProjectName: !Ref ProjectName        
+        LambdaHostSecurityGroup: !Ref CustomResourceSecurityGroup
+        BuildHash: !Ref BuildHash
+        Secrets: !Ref Secrets
+        S3SecretsUri: !If [isPrimary, !Ref "S3SecretsUriUs", !Ref S3SecretsUri] #s3url of uploaded secret json file
+        GpgPassphrase: !Ref GpgPassphrase #arn of secret containing gpg key 
+        GpgSecretArn: !If [isPrimary, !Ref "GpgSecretArnUs", !Ref GpgSecretArnEu] #arn of secret containing gpg key
